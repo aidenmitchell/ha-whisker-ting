@@ -5,12 +5,20 @@
 
 Home Assistant integration for [Whisker Labs Ting](https://www.tingfire.com/) electrical fire safety sensors.
 
+> [!IMPORTANT]
+> This is an unofficial, reverse-engineered integration. Keep the official Ting
+> app and Whisker Labs Fire Safety Team notifications enabled and treat them as
+> the authoritative safety system. Do not rely on Home Assistant as the sole
+> source of electrical hazard alerts.
+
 ## Features
 
 - **Real-time voltage monitoring** via WebSocket connection
   - Current voltage
   - Voltage high/low
   - Average peaks
+  - Latest readings are published to Home Assistant every five seconds to avoid
+    excessive recorder growth
 - **Fire hazard status** monitoring
   - Electrical Fire Hazard (EFH) detection
   - Utility Fire Hazard (UFH) detection
@@ -73,6 +81,10 @@ Home Assistant integration for [Whisker Labs Ting](https://www.tingfire.com/) el
 ### Voltage shows "Unknown" briefly on startup
 
 This is normal - the integration waits for the WebSocket connection to receive its first data packet before displaying values.
+
+If voltage stays unknown for more than 30 seconds, review the Home Assistant
+logs for `custom_components.whisker_ting.websocket` and open an issue with the
+error text. Never include your password, API key, or authentication tokens.
 
 ### Authentication errors
 
