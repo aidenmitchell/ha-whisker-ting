@@ -134,7 +134,7 @@ class WhiskerDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DeviceState]]
                 if self._ws_connected and self._ws_manager:
                     # Wait for data from all devices in parallel
                     wait_tasks = [
-                        self._ws_manager.wait_for_data(device_state.station_id, timeout=5.0)
+                        self._ws_manager.wait_for_data(device_state.station_id, timeout=15.0)
                         for device_state in data.values()
                         if device_state.station_id
                     ]
