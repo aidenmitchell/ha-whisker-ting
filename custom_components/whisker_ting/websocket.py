@@ -191,6 +191,7 @@ class WhiskerWebSocket:
 
             self._connected = True
             self._last_data_time = datetime.now()
+            self._connected_at = datetime.now()
 
             # Start background tasks
             self._receive_task = asyncio.create_task(self._receive_loop())
@@ -203,6 +204,13 @@ class WhiskerWebSocket:
         except Exception as err:
             _LOGGER.error("Failed to connect to SignalR hub: %s", err)
             self._connected = False
+            # Close the half-open socket so it is not leaked
+            if self._ws and not self._ws.closed:
+                try:
+                    await self._ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._ws = None
             return False
 
     async def disconnect(self) -> None:
@@ -284,7 +292,13 @@ class WhiskerWebSocket:
 
         # Notify manager that we disconnected (for reconnection)
         if not self._shutting_down and self._on_disconnect:
-            _LOGGER.warning("WebSocket disconnected for station %s, triggering reconnect", self._station_id)
+            # The Ting cloud closes streams on a fixed session lifetime (~530 s). A close after a
+            # healthy session is routine: log quietly and let the manager reconnect immediately.
+            lived = (datetime.now() - self._connected_at).total_seconds() if getattr(self, "_connected_at", None) else 0
+            if lived > 300:
+                _LOGGER.info("WebSocket closed by server after %.0f s for station %s, reconnecting", lived, self._station_id)
+            else:
+                _LOGGER.warning("WebSocket disconnected for station %s after %.0f s, triggering reconnect", self._station_id, lived)
             self._on_disconnect(self._station_id)
 
     async def _stale_data_check_loop(self) -> None:
@@ -362,8 +376,6 @@ class WhiskerWebSocketManager:
     def _handle_voltage_update(self, station_id: str, data: VoltageData) -> None:
         """Handle voltage update from WebSocket."""
         self._voltage_data[station_id] = data
-        # Reset reconnect attempts on successful data
-        self._reconnect_attempts[station_id] = 0
         _LOGGER.debug(
             "Voltage update for %s: %.2fV (hi: %.2fV, lo: %.2fV)",
             station_id,
@@ -379,9 +391,14 @@ class WhiskerWebSocketManager:
         if self._shutting_down:
             return
 
-        # Remove old connection
-        if station_id in self._connections:
-            del self._connections[station_id]
+        # Close the old connection instead of just dropping it (leaked sockets eventually exhaust file descriptors: EMFILE)
+        old = self._connections.pop(station_id, None)
+        if old is not None:
+            connected_at = getattr(old, "_connected_at", None)
+            if connected_at and (datetime.now() - connected_at).total_seconds() > 300:
+                self._reconnect_attempts[station_id] = 0
+            old._on_disconnect = None  # stop its receive loop from triggering a second reconnect
+            asyncio.create_task(old.disconnect())
 
         # Schedule reconnection
         if station_id not in self._reconnect_tasks or self._reconnect_tasks[station_id].done():
@@ -398,13 +415,17 @@ class WhiskerWebSocketManager:
         creds = self._credentials[station_id]
         attempts = self._reconnect_attempts.get(station_id, 0)
 
-        # Calculate delay with exponential backoff
-        delay = min(
-            self.RECONNECT_MIN_DELAY * (self.RECONNECT_BACKOFF_FACTOR ** attempts),
-            self.RECONNECT_MAX_DELAY,
-        )
+        # Calculate delay with exponential backoff. First attempt after a healthy session is
+        # near-immediate (the server's routine ~530 s close), so the voltage stream barely gaps.
+        if attempts == 0:
+            delay = 1
+        else:
+            delay = min(
+                self.RECONNECT_MIN_DELAY * (self.RECONNECT_BACKOFF_FACTOR ** (attempts - 1)),
+                self.RECONNECT_MAX_DELAY,
+            )
 
-        _LOGGER.info(
+        _LOGGER.debug(
             "Reconnecting to station %s in %.0f seconds (attempt %d)",
             station_id,
             delay,
@@ -430,7 +451,7 @@ class WhiskerWebSocketManager:
 
         if await ws.connect():
             self._connections[station_id] = ws
-            _LOGGER.info("Reconnected to station %s", station_id)
+            _LOGGER.debug("Reconnected to station %s", station_id)
         else:
             _LOGGER.warning("Reconnection failed for station %s, will retry", station_id)
             # Schedule another reconnect attempt
